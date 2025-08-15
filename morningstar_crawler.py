@@ -1,17 +1,19 @@
 """Morningstar Crawler for Monthly Newsletters"""
 
 import os
+import time
+from enum import Enum
+
 import google.generativeai as genai
+from selenium.webdriver.common.keys import Keys
+from dotenv import load_dotenv
 from selenium import webdriver
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from dotenv import load_dotenv
-import time
-from urllib.parse import urlparse
+from selenium.webdriver.support.ui import WebDriverWait
 
 # It's a good practice to load environment variables for API keys
 load_dotenv()
@@ -28,6 +30,13 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 class MorningstarCrawler:
     """Crawler for fetching stock newsletters from Morningstar."""
+
+    class URLType(Enum):
+        """Enumeration for URL types."""
+
+        OPEN = 1
+        CLICK = 2
+        UNSUPPORTED = 3
 
     STOCK_LINK = "https://research-morningstar-com.ezproxy.sfpl.org/collections/767/stock-investor-publications"
 
@@ -61,7 +70,8 @@ class MorningstarCrawler:
         barcode_elem.send_keys(os.getenv("MORNINGSTAR_LOGIN"))
         password_elem.send_keys(os.getenv("MORNINGSTAR_PASSWORD"))
         password_elem.send_keys(Keys.RETURN)
-        _ = WebDriverWait(self.driver, 10).until(
+        print("Waiting for login...")
+        _ = WebDriverWait(self.driver, 20).until(
             EC.presence_of_all_elements_located((By.ID, "site-nav__home"))
         )
         print("Logged in successfully.")
@@ -71,9 +81,9 @@ class MorningstarCrawler:
         url = "https://research-morningstar-com.ezproxy.sfpl.org/stocks"
         self._get_stocks(url)
 
-    def _get_stocks(self, url) -> None:
+    def _get_stocks(self, base_url) -> None:
         """Fetches stocks from Morningstar's model portfolios."""
-        self.driver.get(url)
+        self.driver.get(base_url)
         WebDriverWait(self.driver, 10).until(
             EC.presence_of_element_located(
                 (By.CLASS_NAME, "investment-ideas__section-header")
@@ -85,68 +95,128 @@ class MorningstarCrawler:
             try:
                 element = element.find_element(By.CLASS_NAME, "mdc-card__title")
                 href = element.get_attribute("href")
-                if "screen" in href:
-                    print(f"Skipping screen found in {href}")
-                    continue
                 urls.append(href)
             except NoSuchElementException as e:
                 print(f"Error finding element: {e}")
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
-        for each_url in urls:
-            self.get_stock_details(each_url)
+        url_types = list(map(self._analyze_url, urls))
+        follow_up: list[str] = []
+        print(urls, url_types)
+        for each_url, url_type in zip(urls, url_types):
+            if url_type == MorningstarCrawler.URLType.OPEN:
+                self.driver.get(each_url)
+                self._get_stock_details(class_name="pick-list__table-container")
+            elif url_type == MorningstarCrawler.URLType.CLICK:
+                follow_up.append(each_url)
+            else:
+                print(f"Unsupported URL {each_url}")
 
-    def get_stock_details(self, url):
-        """Fetches details of stocks from the current page."""
-        print(f"Fetching details from {url}")
-        self.driver.get(url)
-        class_name = "model-portfolio__table-container"
-        if "pick-list" in url:
-            class_name = "pick-list__table-container"
-        else:
-            print("Skipping non-pick-list URL:", url)
-            return
-        print("Waiting for element with class:", class_name)
-        WebDriverWait(self.driver, 10).until(
-            EC.presence_of_element_located((By.CLASS_NAME, class_name))
-        )
-        print("Found element with class:", class_name)
-        elem = self.driver.find_element(By.CLASS_NAME, class_name)
-        thead = elem.find_element(By.TAG_NAME, "thead")
-        ths = thead.find_elements(By.TAG_NAME, "th")
-        interesting_indexes = {}
-        filter_indexes = {}
-        interesting_columns = set(["Name", "Ticker", "Fair Value", "Price/Fair Value"])
-        # filter criteria for every column name and the values it can accept.
-        filter_criteria: dict[str, set[str]] = {"Base Currency": set(["US Dollar"])}
-        
-        for i, th in enumerate(ths):
-            if th.text.strip() in interesting_columns:
-                interesting_indexes[th.text.strip()] = i
-            if th.text.strip() in filter_criteria:
-                filter_indexes[i] = th.text.strip()
+        self.click_all(base_url, follow_up)
 
-        tbodies = elem.find_elements(By.TAG_NAME, "tbody")
-        for tbody in tbodies:
-            rows = tbody.find_elements(By.TAG_NAME, "tr")
-            print(interesting_indexes)
-            for row in rows:
-                tds = row.find_elements(By.CLASS_NAME, "mdc-table-cell")
-                if len(tds) != len(ths):
-                    continue
-                filtered = False
-                for index, value in filter_indexes.items():
-                    current_value = tds[index].text.strip()
-                    if current_value not in filter_criteria[value]:
-                        filtered = True
+    def click_all(self, base_url: str, urls: list[str]):
+        """Click all URLs and get stock details."""
+
+        def _internal_click(actual_url):
+            elements = self.driver.find_elements(
+                By.CLASS_NAME, "mdc-investment-list-card"
+            )
+            for element in elements:
+                try:
+                    element = element.find_element(By.CLASS_NAME, "mdc-card__title")
+                    href = element.get_attribute("href")
+                    if href == actual_url:
+                        WebDriverWait(self.driver, 10).until(
+                            EC.element_to_be_clickable(element))
+                        element.send_keys(Keys.RETURN)
+                        self._get_stock_details(
+                            class_name="model-portfolio__table-container"
+                        )
                         break
-                if filtered:
+                except Exception as e:
+                    print(f"Exception raised in internal_click {e}")
                     continue
-                stock_info = {}
-                for value, index in interesting_indexes.items():
-                    if index < len(tds):
-                        stock_info[value] = tds[index].text.strip()
-                print(stock_info)
+
+        for url in urls:
+            self.driver.get(base_url)
+            element = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located(
+                    (By.CLASS_NAME, "investment-ideas__section-header")
+                )
+            )
+            # close the left panel to make it easier to navigate.
+            WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "mds-navigation-panel-toggle-button"))
+            )
+            button = self.driver.find_element(By.ID,"mds-navigation-panel-toggle-button")
+            button.click()
+            # scroll the header into view.
+            section_headers = self.driver.find_elements(By.CLASS_NAME,"investment-ideas__section-header")
+            if len(section_headers) >= 2:
+                print("Scrolling into view")
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView(true);", section_headers[1]
+                )
+            time.sleep(10)
+            print(f"Looking up URL: {url}")
+            _internal_click(url)
+
+    def _analyze_url(self, url) -> URLType:
+        if "pick-list" in url:
+            return MorningstarCrawler.URLType.OPEN
+        if "model-portfolio" in url:
+            return MorningstarCrawler.URLType.CLICK
+        return MorningstarCrawler.URLType.UNSUPPORTED
+
+    def _get_stock_details(self, class_name: str = ""):
+        """Fetches details of stocks from the current page."""
+        try:
+            print("Waiting for element with class:", class_name)
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_element_located((By.CLASS_NAME, class_name))
+            )
+            print("Found element with class:", class_name)
+            time.sleep(10)
+            elem = self.driver.find_element(By.CLASS_NAME, class_name)
+            thead = elem.find_element(By.TAG_NAME, "thead")
+            ths = thead.find_elements(By.TAG_NAME, "th")
+            interesting_indexes = {}
+            filter_indexes = {}
+            interesting_columns = set(
+                ["Name", "Ticker", "Fair Value", "Price/Fair Value"]
+            )
+            # filter criteria for every column name and the values it can accept.
+            filter_criteria: dict[str, set[str]] = {"Base Currency": set(["US Dollar"])}
+
+            for i, th in enumerate(ths):
+                if th.text.strip() in interesting_columns:
+                    interesting_indexes[th.text.strip()] = i
+                if th.text.strip() in filter_criteria:
+                    filter_indexes[i] = th.text.strip()
+
+            tbodies = elem.find_elements(By.TAG_NAME, "tbody")
+            for tbody in tbodies:
+                rows = tbody.find_elements(By.TAG_NAME, "tr")
+                print(interesting_indexes)
+                for row in rows:
+                    tds = row.find_elements(By.CLASS_NAME, "mdc-table-cell")
+                    if len(tds) != len(ths):
+                        continue
+                    filtered = False
+                    for index, value in filter_indexes.items():
+                        current_value = tds[index].text.strip()
+                        if current_value not in filter_criteria[value]:
+                            filtered = True
+                            break
+                    if filtered:
+                        continue
+                    stock_info = {}
+                    for value, index in interesting_indexes.items():
+                        if index < len(tds):
+                            stock_info[value] = tds[index].text.strip()
+                    print(stock_info)
+        except Exception as e:
+            print(f"An error occurred in stock fetching: {e}")
 
     def get_stock_newsletters(self):
         """Fetches stock newsletters."""
