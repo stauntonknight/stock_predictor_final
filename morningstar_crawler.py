@@ -5,7 +5,6 @@ import time
 from enum import Enum
 
 import google.generativeai as genai
-from selenium.webdriver.common.keys import Keys
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException
@@ -101,18 +100,18 @@ class MorningstarCrawler:
             except Exception as e:
                 print(f"An unexpected error occurred: {e}")
         url_types = list(map(self._analyze_url, urls))
-        follow_up: list[str] = []
+        follow_ups: list[str] = []
         print(urls, url_types)
         for each_url, url_type in zip(urls, url_types):
             if url_type == MorningstarCrawler.URLType.OPEN:
                 self.driver.get(each_url)
                 self._get_stock_details(class_name="pick-list__table-container")
             elif url_type == MorningstarCrawler.URLType.CLICK:
-                follow_up.append(each_url)
+                follow_ups.append(each_url)
             else:
                 print(f"Unsupported URL {each_url}")
 
-        self.click_all(base_url, follow_up)
+        self.click_all(base_url, follow_ups)
 
     def click_all(self, base_url: str, urls: list[str]):
         """Click all URLs and get stock details."""
@@ -127,7 +126,8 @@ class MorningstarCrawler:
                     href = element.get_attribute("href")
                     if href == actual_url:
                         WebDriverWait(self.driver, 10).until(
-                            EC.element_to_be_clickable(element))
+                            EC.element_to_be_clickable(element)
+                        )
                         element.send_keys(Keys.RETURN)
                         self._get_stock_details(
                             class_name="model-portfolio__table-container"
@@ -139,25 +139,6 @@ class MorningstarCrawler:
 
         for url in urls:
             self.driver.get(base_url)
-            element = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CLASS_NAME, "investment-ideas__section-header")
-                )
-            )
-            # close the left panel to make it easier to navigate.
-            WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable((By.ID, "mds-navigation-panel-toggle-button"))
-            )
-            button = self.driver.find_element(By.ID,"mds-navigation-panel-toggle-button")
-            button.click()
-            # scroll the header into view.
-            section_headers = self.driver.find_elements(By.CLASS_NAME,"investment-ideas__section-header")
-            if len(section_headers) >= 2:
-                print("Scrolling into view")
-                self.driver.execute_script(
-                    "arguments[0].scrollIntoView(true);", section_headers[1]
-                )
-            time.sleep(10)
             print(f"Looking up URL: {url}")
             _internal_click(url)
 
@@ -176,6 +157,7 @@ class MorningstarCrawler:
                 EC.presence_of_element_located((By.CLASS_NAME, class_name))
             )
             print("Found element with class:", class_name)
+            # Wait for stock data to load in the table.
             time.sleep(10)
             elem = self.driver.find_element(By.CLASS_NAME, class_name)
             thead = elem.find_element(By.TAG_NAME, "thead")
